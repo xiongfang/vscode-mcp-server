@@ -163,12 +163,59 @@ function escapeRegex(str: string): string {
 }
 
 /**
+ * Counts regex matches in a file without modifying it (preview helper)
+ */
+async function countRegexMatches(
+    fileUri: vscode.Uri,
+    pattern: string,
+    literal: boolean = false,
+    startLine?: number,
+    endLine?: number
+): Promise<{ count: number; searchText: string }> {
+    const document = await vscode.workspace.openTextDocument(fileUri);
+    const fullText = document.getText();
+
+    let searchText: string;
+    let rangeStartOffset: number;
+    let rangeEndOffset: number;
+
+    if (startLine === undefined && endLine === undefined) {
+        searchText = fullText;
+        rangeStartOffset = 0;
+        rangeEndOffset = fullText.length;
+    } else {
+        const start = startLine !== undefined ? Math.max(0, startLine - 1) : 0;
+        const end = endLine !== undefined ? Math.min(document.lineCount - 1, endLine - 1) : document.lineCount - 1;
+        if (start > end) {
+            throw new Error(`startLine (${startLine}) cannot be greater than endLine (${endLine})`);
+        }
+        rangeStartOffset = document.offsetAt(new vscode.Position(start, 0));
+        rangeEndOffset = end < document.lineCount - 1
+            ? document.offsetAt(new vscode.Position(end + 1, 0))
+            : fullText.length;
+        searchText = fullText.substring(rangeStartOffset, rangeEndOffset);
+    }
+
+    let regex: RegExp;
+    try {
+        regex = literal
+            ? new RegExp(escapeRegex(pattern), 'g')
+            : new RegExp(pattern, 'gm');
+    } catch (e) {
+        throw new Error(`Invalid regex pattern: ${pattern} — ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    const matches = searchText.match(regex);
+    return { count: matches ? matches.length : 0, searchText };
+}
+
+/**
  * Replaces text in a file using regex pattern matching — no line numbers needed!
  * @param workspacePath The path within the workspace to the file
  * @param pattern The regex pattern (or literal string if literal=true)
  * @param replacement The replacement string
  * @param literal Whether to treat pattern as literal string (default false = regex)
- * @param expectedReplacements Optional: expected number of replacements, throws if mismatch
+ * @param expectedReplacements Required: expected number of replacements, throws if mismatch (prevents accidental mass-replacements like $ matching every line)
  * @param startLine Optional: 1-based start line (inclusive), default 1 = beginning
  * @param endLine Optional: 1-based end line (inclusive), default = end of file
  * @returns Number of replacements made
@@ -178,7 +225,7 @@ export async function replaceWorkspaceFileByRegex(
     pattern: string,
     replacement: string,
     literal: boolean = false,
-    expectedReplacements?: number,
+    expectedReplacements: number,
     startLine?: number,
     endLine?: number
 ): Promise<number> {
@@ -196,48 +243,27 @@ export async function replaceWorkspaceFileByRegex(
         const document = await vscode.workspace.openTextDocument(fileUri);
         const fullText = document.getText();
         
-        // Determine the text range to search in
-        let searchText: string;
+        // Use helper to count matches and get search text range
+        const { count: actualCount, searchText } = await countRegexMatches(fileUri, pattern, literal, startLine, endLine);
+        
+        // Calculate the full document offset range
         let rangeStartOffset: number;
         let rangeEndOffset: number;
         
         if (startLine === undefined && endLine === undefined) {
-            // Search entire file
-            searchText = fullText;
             rangeStartOffset = 0;
             rangeEndOffset = fullText.length;
         } else {
             const start = startLine !== undefined ? Math.max(0, startLine - 1) : 0;
             const end = endLine !== undefined ? Math.min(document.lineCount - 1, endLine - 1) : document.lineCount - 1;
-            
-            if (start > end) {
-                throw new Error(`startLine (${startLine}) cannot be greater than endLine (${endLine})`);
-            }
-            
             rangeStartOffset = document.offsetAt(new vscode.Position(start, 0));
             rangeEndOffset = end < document.lineCount - 1 
                 ? document.offsetAt(new vscode.Position(end + 1, 0))
                 : fullText.length;
-            
-            searchText = fullText.substring(rangeStartOffset, rangeEndOffset);
         }
         
-        // Build regex with global flag
-        let regex: RegExp;
-        try {
-            regex = literal 
-                ? new RegExp(escapeRegex(pattern), 'g')
-                : new RegExp(pattern, 'gm');
-        } catch (e) {
-            throw new Error(`Invalid regex pattern: ${pattern} — ${e instanceof Error ? e.message : String(e)}`);
-        }
-        
-        // Count matches before replacement (only within range)
-        const matches = searchText.match(regex);
-        const actualCount = matches ? matches.length : 0;
-        
-        // If expected count specified, verify it
-        if (expectedReplacements !== undefined && actualCount !== expectedReplacements) {
+        // Verify expected count matches actual (required, prevents accidents like $ matching every line)
+        if (actualCount !== expectedReplacements) {
             throw new Error(
                 `Expected ${expectedReplacements} replacement(s), but pattern matched ${actualCount} time(s). ` +
                 `No changes were made.`
@@ -248,8 +274,18 @@ export async function replaceWorkspaceFileByRegex(
             return 0; // No matches, nothing to do
         }
         
+        // Build regex for replacement
+        let replaceRegex: RegExp;
+        try {
+            replaceRegex = literal
+                ? new RegExp(escapeRegex(pattern), 'g')
+                : new RegExp(pattern, 'gm');
+        } catch (e) {
+            throw new Error(`Invalid regex pattern: ${pattern} — ${e instanceof Error ? e.message : String(e)}`);
+        }
+        
         // Perform replacement only within the specified range
-        const newSearchText = searchText.replace(regex, replacement);
+        const newSearchText = searchText.replace(replaceRegex, replacement);
         const newText = fullText.substring(0, rangeStartOffset) + newSearchText + fullText.substring(rangeEndOffset);
         
         // Apply via WorkspaceEdit (full document replace)
@@ -386,7 +422,7 @@ export function registerEditTools(server: McpServer): void {
 
         TIPS:
         - Use literal=true for simple string find-and-replace (no regex escaping needed)
-        - Use expectedReplacements to verify the right number of changes are made
+        - expectedReplacements is REQUIRED to prevent accidental mass-replacements (like $ matching every line)
         - Use startLine/endLine to limit search scope (both optional, 1-based, inclusive)
         - For large files, be specific with your pattern to avoid unintended matches
         - The tool uses VS Code's WorkspaceEdit for proper undo support`,
@@ -395,7 +431,7 @@ export function registerEditTools(server: McpServer): void {
             pattern: z.string().describe('The regex pattern (or literal string if literal=true) to search for'),
             replacement: z.string().describe('The replacement text'),
             literal: z.boolean().optional().default(false).describe('If true, pattern is treated as a literal string (no regex). Default: false'),
-            expectedReplacements: z.number().optional().describe('Expected number of replacements. If specified and actual count differs, throws error without changing file.'),
+            expectedReplacements: z.number().describe('REQUIRED: Expected number of replacements. Throws error if actual count differs — prevents accidental mass-replacements.'),
             startLine: z.number().optional().describe('Optional: 1-based start line (inclusive). Default: 1 (beginning of file)'),
             endLine: z.number().optional().describe('Optional: 1-based end line (inclusive). Default: end of file')
         },
@@ -419,6 +455,82 @@ export function registerEditTools(server: McpServer): void {
                 return result;
             } catch (error) {
                 console.error('[replace_regex_code] Error in tool:', error);
+                throw error;
+            }
+        }
+    );
+
+    // Add preview_regex_code tool
+    server.tool(
+        'preview_regex_code',
+        `预览正则匹配结果（只读，不修改文件）。
+         
+         WHEN TO USE: 在 replace_regex_code 之前先用此工具确认 pattern 匹配次数是否正确。
+         防止因 $ 等通配符匹配到意料之外的位置导致文件损坏。
+         
+         HOW IT WORKS:
+         1. 与 replace_regex_code 使用相同的匹配逻辑
+         2. 返回匹配次数和匹配片段预览（前3个）
+         3. 不修改文件，纯只读操作
+         
+         WORKFLOW:
+         先用 preview_regex_code 确认次数 → 再用 replace_regex_code 执行替换`,
+        {
+            path: z.string().describe('The path to the file to preview'),
+            pattern: z.string().describe('The regex pattern (or literal string if literal=true) to preview'),
+            literal: z.boolean().optional().default(false).describe('If true, pattern is treated as a literal string (no regex). Default: false'),
+            startLine: z.number().optional().describe('Optional: 1-based start line (inclusive). Default: 1 (beginning of file)'),
+            endLine: z.number().optional().describe('Optional: 1-based end line (inclusive). Default: end of file')
+        },
+        async ({ path, pattern, literal = false, startLine, endLine }): Promise<CallToolResult> => {
+            console.log(`[preview_regex_code] Tool called with path=${path}, pattern=${pattern}, literal=${literal}, startLine=${startLine}, endLine=${endLine}`);
+            
+            try {
+                if (!vscode.workspace.workspaceFolders) {
+                    throw new Error('No workspace folder is open');
+                }
+
+                const workspaceFolder = vscode.workspace.workspaceFolders[0];
+                const workspaceUri = workspaceFolder.uri;
+                const fileUri = vscode.Uri.joinPath(workspaceUri, path);
+                
+                const { count, searchText } = await countRegexMatches(fileUri, pattern, literal, startLine, endLine);
+                
+                // Get first 3 match snippets for preview
+                let regex: RegExp;
+                try {
+                    regex = literal
+                        ? new RegExp(escapeRegex(pattern), 'g')
+                        : new RegExp(pattern, 'gm');
+                } catch (e) {
+                    throw new Error(`Invalid regex pattern: ${pattern}`);
+                }
+                
+                let previewSnippets = '';
+                if (count > 0) {
+                    const matches = searchText.match(regex) || [];
+                    const snippets = matches.slice(0, 3).map((m: string, i: number) => {
+                        const trimmed = m.length > 80 ? m.substring(0, 80) + '...' : m;
+                        return `  [${i + 1}] "${trimmed}"`;
+                    });
+                    previewSnippets = '\n' + snippets.join('\n');
+                    if (count > 3) {
+                        previewSnippets += `\n  ... 还有 ${count - 3} 个匹配`;
+                    }
+                }
+
+                const result: CallToolResult = {
+                    content: [
+                        {
+                            type: 'text',
+                            text: `Pattern 在 ${path} 中匹配了 ${count} 次${previewSnippets}`
+                        }
+                    ]
+                };
+                console.log('[preview_regex_code] Successfully completed');
+                return result;
+            } catch (error) {
+                console.error('[preview_regex_code] Error in tool:', error);
                 throw error;
             }
         }

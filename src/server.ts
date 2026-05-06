@@ -9,11 +9,13 @@ import { registerEditTools } from './tools/edit-tools';
 import { registerShellTools } from './tools/shell-tools';
 import { registerDiagnosticsTools } from './tools/diagnostics-tools';
 import { registerSymbolTools } from './tools/symbol-tools';
+import { registerDiffTools } from './tools/diff-tools';
 import { logger } from './utils/logger';
 
 export interface ToolConfiguration {
     file: boolean;
     edit: boolean;
+    diff: boolean;
     shell: boolean;
     diagnostics: boolean;
     symbol: boolean;
@@ -41,6 +43,7 @@ export class MCPServer {
         this.toolConfig = toolConfig || {
             file: true,
             edit: true,
+            diff: true,
             shell: true,
             diagnostics: true,
             symbol: true
@@ -114,6 +117,14 @@ export class MCPServer {
                 logger.info('MCP symbol tools registered successfully');
             } else {
                 logger.info('MCP symbol tools disabled by configuration');
+            }
+            
+            // Register diff tools if enabled
+            if (this.toolConfig.diff) {
+                registerDiffTools(this.server);
+                logger.info('MCP diff tools registered successfully');
+            } else {
+                logger.info('MCP diff tools disabled by configuration');
             }
         } else {
             logger.warn('File listing callback not set during tools setup');

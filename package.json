@@ -43,6 +43,7 @@
           "default": {
             "file": true,
             "edit": true,
+            "diff": true,
             "shell": true,
             "diagnostics": true,
             "symbol": true
@@ -55,6 +56,10 @@
             "edit": {
               "type": "boolean",
               "description": "Enable file editing tools (create, edit, delete files)"
+            },
+            "diff": {
+              "type": "boolean",
+              "description": "Enable unified diff editing tools (apply_diff_code, preview_diff_code)"
             },
             "shell": {
               "type": "boolean",

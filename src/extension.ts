@@ -26,6 +26,7 @@ function getToolConfiguration(): ToolConfiguration {
     return {
         file: enabledTools.file ?? true,
         edit: enabledTools.edit ?? true,
+        diff: enabledTools.diff ?? true,
         shell: enabledTools.shell ?? true,
         diagnostics: enabledTools.diagnostics ?? true,
         symbol: enabledTools.symbol ?? true

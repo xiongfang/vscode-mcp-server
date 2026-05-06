@@ -329,6 +329,91 @@ export function registerDiffTools(server: McpServer): void {
     }
   );
 
+  // ---- edit_file_code ----
+  // 基于文本匹配的精确编辑工具（类似 filesystem_edit_file）
+  server.tool(
+    'edit_file_code',
+    `在文件中精确查找文本并替换。
+
+    工作原理：在文件中逐行查找 oldText，精确匹配后替换为 newText。
+    不需要行号，不需要正则。
+
+    适用场景：
+    - 替换函数/变量名
+    - 修改配置项
+    - 替换固定的代码片段
+
+    限制：
+    - 只替换第一个匹配项（从文件开头匹配）
+    - 不支持模糊匹配，oldText 必须与原文完全一致
+    - 不支持正则表达式（如需正则请用 replace_regex_code）`,
+    {
+      path: z.string().describe('要编辑的文件路径（相对工作区根目录）'),
+      oldText: z.string().describe('要匹配的原文内容（精确匹配，区分大小写）'),
+      newText: z.string().describe('替换后的新内容'),
+    },
+    async ({ path, oldText, newText }): Promise<CallToolResult> => {
+      console.log(`[edit_file_code] Tool called with path=${path}`);
+
+      try {
+        if (!vscode.workspace.workspaceFolders) {
+          throw new Error('No workspace folder is open');
+        }
+        const workspaceFolder = vscode.workspace.workspaceFolders[0];
+        const workspaceUri = workspaceFolder.uri;
+        const fileUri = vscode.Uri.joinPath(workspaceUri, path);
+
+        const document = await vscode.workspace.openTextDocument(fileUri);
+        const fullText = document.getText();
+
+        // 在全文搜索 oldText
+        const matchIndex = fullText.indexOf(oldText);
+        if (matchIndex === -1) {
+          // 没找到，给个预览帮助调试
+          const preview = fullText.length > 200
+            ? fullText.substring(0, 200) + '...'
+            : fullText;
+          throw new Error(
+            `在 ${path} 中未找到匹配的文本。\n` +
+            `要查找: "${oldText.substring(0, 100)}"\n` +
+            `文件内容预览:\n${preview}`
+          );
+        }
+
+        // 计算匹配范围
+        const matchStartPos = document.positionAt(matchIndex);
+        const matchEndPos = document.positionAt(matchIndex + oldText.length);
+        const matchRange = new vscode.Range(matchStartPos, matchEndPos);
+
+        // 应用编辑
+        const editor = await vscode.window.showTextDocument(document);
+        const success = await editor.edit((editBuilder) => {
+          editBuilder.replace(matchRange, newText);
+        });
+
+        if (!success) {
+          throw new Error(`编辑失败: ${path}`);
+        }
+
+        await document.save();
+
+        const result: CallToolResult = {
+          content: [
+            {
+              type: 'text',
+              text: `✅ 成功编辑 ${path}\n替换: "${oldText.substring(0, 60)}..." → "${newText.substring(0, 60)}..."`
+            }
+          ]
+        };
+        console.log('[edit_file_code] Success');
+        return result;
+      } catch (error) {
+        console.error('[edit_file_code] Error:', error);
+        throw error;
+      }
+    }
+  );
+
   // ---- preview_diff_code ----
   // 预览工具：在不修改文件的情况下预览 diff 效果
   server.tool(

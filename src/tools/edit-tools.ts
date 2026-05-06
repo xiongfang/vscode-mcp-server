@@ -315,6 +315,9 @@ export async function replaceWorkspaceFileByRegex(
 /**
  * Registers MCP edit-related tools with the server
  * @param server MCP server instance
+ * 
+ * 注意: replace_lines_code / replace_regex_code / preview_regex_code 已被屏蔽。
+ * 请使用 diff-tools.ts 中的 edit_file_code / apply_diff_code / preview_diff_code。
  */
 export function registerEditTools(server: McpServer): void {
     // Add create_file tool
@@ -323,7 +326,7 @@ export function registerEditTools(server: McpServer): void {
         `Creates new files or completely rewrites existing files.
 
         WHEN TO USE: New files, large modifications (>10 lines), complete file rewrites.
-        USE replace_lines_code instead for: small edits ≤10 lines where you have exact original content.
+        For small edits, use edit_file_code or apply_diff_code instead.
 
         File handling: Use overwrite=true to replace existing files, ignoreIfExists=true to skip if file exists.
         Always check with list_files_code first unless you specifically want to overwrite.`,
@@ -357,182 +360,8 @@ export function registerEditTools(server: McpServer): void {
         }
     );
 
-    // Add replace_lines_code tool
-    server.tool(
-        'replace_lines_code',
-        `Replaces specific lines in existing files with exact content validation.
-
-        WHEN TO USE: Modifications ≤10 lines where you have exact original text, or inserts of any size.
-        USE create_file_code instead for: new files, large modifications (>10 lines), or when original text is uncertain.
-
-        HOW IT WORKS: Searches for originalCode as a SUBSTRING within [startLine, endLine].
-        Only the matched text is replaced — surrounding content stays unchanged.
-        This is like desktop_edit_block — no need to match the entire line range!
-
-        CRITICAL: originalCode must be found as-is within the line range.
-        If tool fails: run read_file_code to check current content, then retry.
-        Parameters use 1-based line numbers.`,
-        {
-            path: z.string().describe('The path to the file to modify'),
-            startLine: z.number().describe('The start line number (1-based, inclusive)'),
-            endLine: z.number().describe('The end line number (1-based, inclusive)'),
-            content: z.string().describe('The new content to replace the lines with'),
-            originalCode: z.string().describe('The original code for validation - must match exactly')
-        },
-        async ({ path, startLine, endLine, content, originalCode }): Promise<CallToolResult> => {
-            console.log(`[replace_lines_code] Tool called with path=${path}, startLine=${startLine}, endLine=${endLine}`);
-            
-            // Convert 1-based input to 0-based for VS Code API
-            const zeroBasedStartLine = startLine - 1;
-            const zeroBasedEndLine = endLine - 1;
-            
-            try {
-                console.log('[replace_lines_code] Replacing lines');
-                await replaceWorkspaceFileLines(path, zeroBasedStartLine, zeroBasedEndLine, content, originalCode);
-                
-                const result: CallToolResult = {
-                    content: [
-                        {
-                            type: 'text',
-                            text: `Replace succeed in ${path}: originalCode found within lines ${startLine}-${endLine}, matched text replaced`
-                        }
-                    ]
-                };
-                console.log('[replace_lines_code] Successfully completed');
-                return result;
-            } catch (error) {
-                console.error('[replace_lines_code] Error in tool:', error);
-                throw error;
-            }
-        }
-    );
-
-    // Add replace_regex_code tool
-    server.tool(
-        'replace_regex_code',
-        `Searches and replaces text in files using regular expressions (or literal strings).
-
-        WHEN TO USE: Any text replacement where you know WHAT to change but not WHERE (line numbers).
-        This is the RECOMMENDED tool for most edits — no line numbers or originalCode validation needed!
-
-        HOW IT WORKS:
-        1. pattern is compiled as a RegExp with 'gm' flags (global + multiline)
-        2. All matches are replaced with replacement string
-        3. Returns the count of replacements made
-
-        TIPS:
-        - Use literal=true for simple string find-and-replace (no regex escaping needed)
-        - expectedReplacements is REQUIRED to prevent accidental mass-replacements (like $ matching every line)
-        - Use startLine/endLine to limit search scope (both optional, 1-based, inclusive)
-        - For large files, be specific with your pattern to avoid unintended matches
-        - The tool uses VS Code's WorkspaceEdit for proper undo support`,
-        {
-            path: z.string().describe('The path to the file to modify'),
-            pattern: z.string().describe('The regex pattern (or literal string if literal=true) to search for'),
-            replacement: z.string().describe('The replacement text'),
-            literal: z.boolean().optional().default(false).describe('If true, pattern is treated as a literal string (no regex). Default: false'),
-            expectedReplacements: z.number().describe('REQUIRED: Expected number of replacements. Throws error if actual count differs — prevents accidental mass-replacements.'),
-            startLine: z.number().optional().describe('Optional: 1-based start line (inclusive). Default: 1 (beginning of file)'),
-            endLine: z.number().optional().describe('Optional: 1-based end line (inclusive). Default: end of file')
-        },
-        async ({ path, pattern, replacement, literal = false, expectedReplacements, startLine, endLine }): Promise<CallToolResult> => {
-            console.log(`[replace_regex_code] Tool called with path=${path}, pattern=${pattern}, literal=${literal}, startLine=${startLine}, endLine=${endLine}`);
-            
-            try {
-                const count = await replaceWorkspaceFileByRegex(path, pattern, replacement, literal, expectedReplacements, startLine, endLine);
-                
-                const result: CallToolResult = {
-                    content: [
-                        {
-                            type: 'text',
-                            text: count > 0
-                                ? `Regex replace: ${count} replacement(s) made in ${path}`
-                                : `Regex replace: no matches found in ${path}`
-                        }
-                    ]
-                };
-                console.log('[replace_regex_code] Successfully completed');
-                return result;
-            } catch (error) {
-                console.error('[replace_regex_code] Error in tool:', error);
-                throw error;
-            }
-        }
-    );
-
-    // Add preview_regex_code tool
-    server.tool(
-        'preview_regex_code',
-        `预览正则匹配结果（只读，不修改文件）。
-         
-         WHEN TO USE: 在 replace_regex_code 之前先用此工具确认 pattern 匹配次数是否正确。
-         防止因 $ 等通配符匹配到意料之外的位置导致文件损坏。
-         
-         HOW IT WORKS:
-         1. 与 replace_regex_code 使用相同的匹配逻辑
-         2. 返回匹配次数和匹配片段预览（前3个）
-         3. 不修改文件，纯只读操作
-         
-         WORKFLOW:
-         先用 preview_regex_code 确认次数 → 再用 replace_regex_code 执行替换`,
-        {
-            path: z.string().describe('The path to the file to preview'),
-            pattern: z.string().describe('The regex pattern (or literal string if literal=true) to preview'),
-            literal: z.boolean().optional().default(false).describe('If true, pattern is treated as a literal string (no regex). Default: false'),
-            startLine: z.number().optional().describe('Optional: 1-based start line (inclusive). Default: 1 (beginning of file)'),
-            endLine: z.number().optional().describe('Optional: 1-based end line (inclusive). Default: end of file')
-        },
-        async ({ path, pattern, literal = false, startLine, endLine }): Promise<CallToolResult> => {
-            console.log(`[preview_regex_code] Tool called with path=${path}, pattern=${pattern}, literal=${literal}, startLine=${startLine}, endLine=${endLine}`);
-            
-            try {
-                if (!vscode.workspace.workspaceFolders) {
-                    throw new Error('No workspace folder is open');
-                }
-
-                const workspaceFolder = vscode.workspace.workspaceFolders[0];
-                const workspaceUri = workspaceFolder.uri;
-                const fileUri = vscode.Uri.joinPath(workspaceUri, path);
-                
-                const { count, searchText } = await countRegexMatches(fileUri, pattern, literal, startLine, endLine);
-                
-                // Get first 3 match snippets for preview
-                let regex: RegExp;
-                try {
-                    regex = literal
-                        ? new RegExp(escapeRegex(pattern), 'g')
-                        : new RegExp(pattern, 'gm');
-                } catch (e) {
-                    throw new Error(`Invalid regex pattern: ${pattern}`);
-                }
-                
-                let previewSnippets = '';
-                if (count > 0) {
-                    const matches = searchText.match(regex) || [];
-                    const snippets = matches.slice(0, 3).map((m: string, i: number) => {
-                        const trimmed = m.length > 80 ? m.substring(0, 80) + '...' : m;
-                        return `  [${i + 1}] "${trimmed}"`;
-                    });
-                    previewSnippets = '\n' + snippets.join('\n');
-                    if (count > 3) {
-                        previewSnippets += `\n  ... 还有 ${count - 3} 个匹配`;
-                    }
-                }
-
-                const result: CallToolResult = {
-                    content: [
-                        {
-                            type: 'text',
-                            text: `Pattern 在 ${path} 中匹配了 ${count} 次${previewSnippets}`
-                        }
-                    ]
-                };
-                console.log('[preview_regex_code] Successfully completed');
-                return result;
-            } catch (error) {
-                console.error('[preview_regex_code] Error in tool:', error);
-                throw error;
-            }
-        }
-    );
+    // ⛔ 以下工具已屏蔽，请使用 diff-tools.ts 中的替代工具:
+    // - replace_lines_code → edit_file_code（精确文本匹配替换）
+    // - replace_regex_code → apply_diff_code（unified diff 编辑）
+    // - preview_regex_code → preview_diff_code（diff 预览）
 }

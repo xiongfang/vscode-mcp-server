@@ -188,11 +188,16 @@ export async function applyDiffToFile(
   const workspaceUri = workspaceFolder.uri;
   const fileUri = vscode.Uri.joinPath(workspaceUri, workspacePath);
 
-  // 从 diff 结果重建新文件内容
+  // 读取原文件以检测换行符风格，避免破坏 CRLF
+  const originalDocument = await vscode.workspace.openTextDocument(fileUri);
+  const originalText = originalDocument.getText();
+  const lineEnding = detectLineEnding(originalText);
+
+  // 从 diff 结果重建新文件内容（使用原文件换行符）
   const newContent = diffLines
     .filter((line) => line.type !== "old")
     .map((line) => line.line)
-    .join("\n");
+    .join(lineEnding);
 
   // 使用 WorkspaceEdit 写入文件
   const workspaceEdit = new vscode.WorkspaceEdit();
@@ -205,9 +210,8 @@ export async function applyDiffToFile(
     throw new Error(`Failed to apply diff to file: ${workspacePath}`);
   }
 
-  // 保存文件
-  const document = await vscode.workspace.openTextDocument(fileUri);
-  await document.save();
+  // 保存文件（复用已打开的文档）
+  await originalDocument.save();
 
   // 计算统计
   const added = diffLines.filter((l) => l.type === "new").length;
@@ -388,11 +392,10 @@ export function registerDiffTools(server: McpServer): void {
         const matchEndPos = document.positionAt(matchIndex + oldText.length);
         const matchRange = new vscode.Range(matchStartPos, matchEndPos);
 
-        // 应用编辑
-        const editor = await vscode.window.showTextDocument(document);
-        const success = await editor.edit((editBuilder) => {
-          editBuilder.replace(matchRange, newText);
-        });
+        // 应用编辑（使用 WorkspaceEdit，不依赖 UI）
+        const workspaceEdit = new vscode.WorkspaceEdit();
+        workspaceEdit.replace(fileUri, matchRange, newText);
+        const success = await vscode.workspace.applyEdit(workspaceEdit);
 
         if (!success) {
           throw new Error(`编辑失败: ${path}`);

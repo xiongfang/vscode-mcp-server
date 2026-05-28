@@ -316,20 +316,20 @@ export async function replaceWorkspaceFileByRegex(
  * Registers MCP edit-related tools with the server
  * @param server MCP server instance
  * 
- * 注意: replace_lines_code / replace_regex_code / preview_regex_code 已被屏蔽。
- * 请使用 diff-tools.ts 中的 edit_file_code / apply_diff_code / preview_diff_code。
+ * 注意: replace_lines / replace_regex / preview_regex 已被屏蔽。
+ * 请使用 diff-tools.ts 中的 edit_file / apply_diff / preview_diff。
  */
 export function registerEditTools(server: McpServer): void {
     // Add create_file tool
     server.tool(
-        'create_file_code',
+        'create_file',
         `Creates new files or completely rewrites existing files.
 
         WHEN TO USE: New files, large modifications (>10 lines), complete file rewrites.
-        For small edits, use edit_file_code or apply_diff_code instead.
+        For small edits, use edit_file or apply_diff instead.
 
         File handling: Use overwrite=true to replace existing files, ignoreIfExists=true to skip if file exists.
-        Always check with list_files_code first unless you specifically want to overwrite.`,
+        Always check with list_files first unless you specifically want to overwrite.`,
         {
             path: z.string().describe('The path to the file to create'),
             content: z.string().describe('The content to write to the file'),
@@ -361,7 +361,7 @@ export function registerEditTools(server: McpServer): void {
     );
 
     // ⛔ 以下工具已屏蔽，请使用 diff-tools.ts 中的替代工具:
-    // - replace_lines_code → edit_file_code（精确文本匹配替换）
-    // - replace_regex_code → apply_diff_code（unified diff 编辑）
-    // - preview_regex_code → preview_diff_code（diff 预览）
+    // - replace_lines → edit_file（精确文本匹配替换）
+    // - replace_regex → apply_diff（unified diff 编辑）
+    // - preview_regex → preview_diff（diff 预览）
 }

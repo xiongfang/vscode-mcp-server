@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from 'zod';
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { detectLineEnding, resolveWorkspacePath, toolResult, ToolFormat } from './tool-utils';
 
 // ============================================================
 // Unified Diff 格式解析与应用
@@ -232,7 +233,9 @@ export function formatDiffPreview(
   for (const dl of diffLines) {
     const prefix = dl.type === "new" ? "+" : dl.type === "old" ? "-" : " ";
     result += `${prefix}${dl.line}\n`;
-    if (dl.type !== "new") lineNum++;
+    if (dl.type !== "new") {
+      lineNum++;
+    }
   }
 
   return result;
@@ -243,10 +246,10 @@ export function formatDiffPreview(
 // ============================================================
 
 export function registerDiffTools(server: McpServer): void {
-  // ---- apply_diff_code ----
+  // ---- apply_diff ----
   // 核心工具：通过 unified diff 格式精确编辑代码
   server.tool(
-    'apply_diff_code',
+    'apply_diff',
     `通过 unified diff 格式精确编辑代码文件。
 
     这是推荐的代码编辑方式！AI 最擅长生成 unified diff 格式。
@@ -278,7 +281,7 @@ export function registerDiffTools(server: McpServer): void {
       diff: z.string().describe('unified diff 格式的编辑内容'),
     },
     async ({ path, diff }): Promise<CallToolResult> => {
-      console.log(`[apply_diff_code] Tool called with path=${path}`);
+      console.log(`[apply_diff] Tool called with path=${path}`);
 
       try {
         // 1. 读取当前文件
@@ -320,19 +323,19 @@ export function registerDiffTools(server: McpServer): void {
             }
           ]
         };
-        console.log(`[apply_diff_code] Success: ${changeCount} changes`);
+        console.log(`[apply_diff] Success: ${changeCount} changes`);
         return result;
       } catch (error) {
-        console.error('[apply_diff_code] Error:', error);
+        console.error('[apply_diff] Error:', error);
         throw error;
       }
     }
   );
 
-  // ---- edit_file_code ----
+  // ---- edit_file ----
   // 基于文本匹配的精确编辑工具（类似 filesystem_edit_file）
   server.tool(
-    'edit_file_code',
+    'edit_file',
     `在文件中精确查找文本并替换。
 
     工作原理：在文件中逐行查找 oldText，精确匹配后替换为 newText。
@@ -346,14 +349,14 @@ export function registerDiffTools(server: McpServer): void {
     限制：
     - 只替换第一个匹配项（从文件开头匹配）
     - 不支持模糊匹配，oldText 必须与原文完全一致
-    - 不支持正则表达式（如需正则请用 replace_regex_code）`,
+    - 不支持正则表达式（如需正则请用 replace_regex）`,
     {
       path: z.string().describe('要编辑的文件路径（相对工作区根目录）'),
       oldText: z.string().describe('要匹配的原文内容（精确匹配，区分大小写）'),
       newText: z.string().describe('替换后的新内容'),
     },
     async ({ path, oldText, newText }): Promise<CallToolResult> => {
-      console.log(`[edit_file_code] Tool called with path=${path}`);
+      console.log(`[edit_file] Tool called with path=${path}`);
 
       try {
         if (!vscode.workspace.workspaceFolders) {
@@ -405,30 +408,30 @@ export function registerDiffTools(server: McpServer): void {
             }
           ]
         };
-        console.log('[edit_file_code] Success');
+        console.log('[edit_file] Success');
         return result;
       } catch (error) {
-        console.error('[edit_file_code] Error:', error);
+        console.error('[edit_file] Error:', error);
         throw error;
       }
     }
   );
 
-  // ---- preview_diff_code ----
+  // ---- preview_diff ----
   // 预览工具：在不修改文件的情况下预览 diff 效果
   server.tool(
-    'preview_diff_code',
+    'preview_diff',
     `预览 unified diff 应用到文件的结果（只读，不修改文件）。
 
-    在 apply_diff_code 之前使用，先确认 diff 效果是否正确。
+    在 apply_diff 之前使用，先确认 diff 效果是否正确。
 
-    格式要求同 apply_diff_code。`,
+    格式要求同 apply_diff。`,
     {
       path: z.string().describe('要预览的文件路径（相对工作区根目录）'),
       diff: z.string().describe('unified diff 格式的编辑内容'),
     },
     async ({ path, diff }): Promise<CallToolResult> => {
-      console.log(`[preview_diff_code] Tool called with path=${path}`);
+      console.log(`[preview_diff] Tool called with path=${path}`);
 
       try {
         if (!vscode.workspace.workspaceFolders) {
@@ -455,15 +458,133 @@ export function registerDiffTools(server: McpServer): void {
           content: [
             {
               type: 'text',
-              text: `📋 预览 diff 应用到 ${path}\n${added} 处新增, ${removed} 处删除\n\n${preview}\n\n使用 apply_diff_code 应用此修改。`
+              text: `📋 预览 diff 应用到 ${path}\n${added} 处新增, ${removed} 处删除\n\n${preview}\n\n使用 apply_diff 应用此修改。`
             }
           ]
         };
         return result;
       } catch (error) {
-        console.error('[preview_diff_code] Error:', error);
+        console.error('[preview_diff] Error:', error);
         throw error;
       }
+    }
+  );
+
+  const patchOperationSchema = z.object({
+    type: z.enum(['add', 'update', 'delete', 'move']),
+    path: z.string().describe('File path relative to workspace root'),
+    content: z.string().optional().describe('Content for add operations'),
+    oldText: z.string().optional().describe('Exact text to replace for update operations'),
+    newText: z.string().optional().describe('Replacement text for update operations'),
+    targetPath: z.string().optional().describe('Target path for move operations'),
+    overwrite: z.boolean().optional().default(false)
+  });
+
+  async function previewPatchOperations(operations: z.infer<typeof patchOperationSchema>[]) {
+    const previews: Array<{ type: string; path: string; targetPath?: string; summary: string }> = [];
+    for (const operation of operations) {
+      if (operation.type === 'add') {
+        previews.push({
+          type: operation.type,
+          path: operation.path,
+          summary: `add ${operation.path} (${operation.content?.length ?? 0} characters)`
+        });
+      } else if (operation.type === 'delete') {
+        previews.push({ type: operation.type, path: operation.path, summary: `delete ${operation.path}` });
+      } else if (operation.type === 'move') {
+        previews.push({
+          type: operation.type,
+          path: operation.path,
+          targetPath: operation.targetPath,
+          summary: `move ${operation.path} -> ${operation.targetPath}`
+        });
+      } else {
+        const fileUri = resolveWorkspacePath(operation.path).uri;
+        const document = await vscode.workspace.openTextDocument(fileUri);
+        const fullText = document.getText();
+        if (operation.oldText === undefined || operation.newText === undefined) {
+          throw new Error(`update operation for ${operation.path} requires oldText and newText`);
+        }
+        const count = fullText.split(operation.oldText).length - 1;
+        previews.push({
+          type: operation.type,
+          path: operation.path,
+          summary: `update ${operation.path}: ${count} match(es), ${operation.oldText.length} -> ${operation.newText.length} characters`
+        });
+      }
+    }
+    return previews;
+  }
+
+  server.tool(
+    'preview_patch',
+    `Previews a structured multi-file patch without modifying files.`,
+    {
+      operations: z.array(patchOperationSchema),
+      format: z.enum(['text', 'json']).optional().default('text')
+    },
+    async ({ operations, format = 'text' }): Promise<CallToolResult> => {
+      const previews = await previewPatchOperations(operations);
+      return toolResult({
+        ok: true,
+        summary: `Previewed ${previews.length} patch operation(s)`,
+        data: { operations: previews }
+      }, format as ToolFormat, previews.map(preview => preview.summary).join('\n'));
+    }
+  );
+
+  server.tool(
+    'apply_patch',
+    `Applies a structured multi-file patch. Supports add, update, delete, and move operations.`,
+    {
+      operations: z.array(patchOperationSchema),
+      format: z.enum(['text', 'json']).optional().default('text')
+    },
+    async ({ operations, format = 'text' }): Promise<CallToolResult> => {
+      const previews = await previewPatchOperations(operations);
+      const edit = new vscode.WorkspaceEdit();
+
+      for (const operation of operations) {
+        const fileUri = resolveWorkspacePath(operation.path).uri;
+        if (operation.type === 'add') {
+          edit.createFile(fileUri, {
+            overwrite: operation.overwrite,
+            contents: new TextEncoder().encode(operation.content ?? '')
+          });
+        } else if (operation.type === 'delete') {
+          edit.deleteFile(fileUri, { ignoreIfNotExists: false });
+        } else if (operation.type === 'move') {
+          if (!operation.targetPath) {
+            throw new Error(`move operation for ${operation.path} requires targetPath`);
+          }
+          edit.renameFile(fileUri, resolveWorkspacePath(operation.targetPath).uri, { overwrite: operation.overwrite });
+        } else {
+          if (operation.oldText === undefined || operation.newText === undefined) {
+            throw new Error(`update operation for ${operation.path} requires oldText and newText`);
+          }
+          const document = await vscode.workspace.openTextDocument(fileUri);
+          const fullText = document.getText();
+          const index = fullText.indexOf(operation.oldText);
+          if (index === -1) {
+            throw new Error(`oldText not found in ${operation.path}`);
+          }
+          const lineEnding = detectLineEnding(fullText);
+          const newText = operation.newText.replace(/\r?\n/g, lineEnding);
+          edit.replace(fileUri, new vscode.Range(document.positionAt(index), document.positionAt(index + operation.oldText.length)), newText);
+        }
+      }
+
+      const success = await vscode.workspace.applyEdit(edit);
+      if (!success) {
+        throw new Error('Failed to apply structured patch');
+      }
+      await vscode.workspace.saveAll(false);
+
+      return toolResult({
+        ok: true,
+        summary: `Applied ${operations.length} patch operation(s)`,
+        data: { operations: previews }
+      }, format as ToolFormat, previews.map(preview => preview.summary).join('\n'));
     }
   );
 }

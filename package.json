@@ -46,7 +46,8 @@
             "diff": true,
             "shell": true,
             "diagnostics": true,
-            "symbol": true
+            "symbol": true,
+            "git": true
           },
           "properties": {
             "file": {
@@ -59,7 +60,7 @@
             },
             "diff": {
               "type": "boolean",
-              "description": "Enable unified diff editing tools (apply_diff_code, preview_diff_code)"
+              "description": "Enable unified diff editing tools (apply_diff, preview_diff, apply_patch, preview_patch)"
             },
             "shell": {
               "type": "boolean",
@@ -72,6 +73,10 @@
             "symbol": {
               "type": "boolean",
               "description": "Enable code symbol and structure analysis tools"
+            },
+            "git": {
+              "type": "boolean",
+              "description": "Enable git workflow tools"
             }
           },
           "description": "Configure which MCP tools are enabled"

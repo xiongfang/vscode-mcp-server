@@ -3,13 +3,13 @@ import * as vscode from 'vscode';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Server } from 'http';
-import { Request, Response } from 'express';
 import { registerFileTools, FileListingCallback } from './tools/file-tools';
 import { registerEditTools } from './tools/edit-tools';
 import { registerShellTools } from './tools/shell-tools';
 import { registerDiagnosticsTools } from './tools/diagnostics-tools';
 import { registerSymbolTools } from './tools/symbol-tools';
 import { registerDiffTools } from './tools/diff-tools';
+import { registerGitTools } from './tools/git-tools';
 import { logger } from './utils/logger';
 
 export interface ToolConfiguration {
@@ -19,6 +19,7 @@ export interface ToolConfiguration {
     shell: boolean;
     diagnostics: boolean;
     symbol: boolean;
+    git?: boolean;
 }
 
 export class MCPServer {
@@ -46,7 +47,8 @@ export class MCPServer {
             diff: true,
             shell: true,
             diagnostics: true,
-            symbol: true
+            symbol: true,
+            git: true
         };
         this.app = express();
         this.app.use(express.json());
@@ -97,7 +99,7 @@ export class MCPServer {
             
             // Register shell tools if enabled
             if (this.toolConfig.shell) {
-                registerShellTools(this.server, this.terminal);
+                registerShellTools(this.server);
                 logger.info('MCP shell tools registered successfully');
             } else {
                 logger.info('MCP shell tools disabled by configuration');
@@ -125,6 +127,13 @@ export class MCPServer {
                 logger.info('MCP diff tools registered successfully');
             } else {
                 logger.info('MCP diff tools disabled by configuration');
+            }
+
+            if (this.toolConfig.git ?? true) {
+                registerGitTools(this.server);
+                logger.info('MCP git tools registered successfully');
+            } else {
+                logger.info('MCP git tools disabled by configuration');
             }
         } else {
             logger.warn('File listing callback not set during tools setup');

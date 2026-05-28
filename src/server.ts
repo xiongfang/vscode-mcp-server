@@ -1,5 +1,4 @@
 import express from "express";
-import * as vscode from 'vscode';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { Server } from 'http';
@@ -30,17 +29,15 @@ export class MCPServer {
     private port: number;
     private host: string;
     private fileListingCallback?: FileListingCallback;
-    private terminal?: vscode.Terminal;
     private toolConfig: ToolConfiguration;
 
     public setFileListingCallback(callback: FileListingCallback) {
         this.fileListingCallback = callback;
     }
 
-    constructor(port: number = 3000, host: string = '127.0.0.1', terminal?: vscode.Terminal, toolConfig?: ToolConfiguration) {
+    constructor(port: number = 3000, host: string = '127.0.0.1', toolConfig?: ToolConfiguration) {
         this.port = port;
         this.host = host;
-        this.terminal = terminal;
         this.toolConfig = toolConfig || {
             file: true,
             edit: true,

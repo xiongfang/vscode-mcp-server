@@ -1,4 +1,5 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import { TextDecoder } from 'util';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from 'zod';
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -33,7 +34,17 @@ function trimOutput(text: string, maxCharacters: number): { text: string; trunca
 
 function createSession(command: string, cwd: string, timeout?: number): ProcessSession {
     const id = String(nextSessionId++);
-    const child = spawn(command, {
+
+    // ── Windows 编码修复 ──
+    // Windows 的 cmd.exe 默认输出使用系统活动代码页（中文系统=GBK/CP936），
+    // 但 Node.js 的 String(chunk) 默认以 UTF-8 解码 Buffer，导致中文字符乱码。
+    // 解决方案：在 Windows 上强制切换 cmd 代码页为 UTF-8 (65001)，
+    // 并优先使用 TextDecoder 解码 Buffer，避免 String() 的 UTF-8 默认行为。
+    const cmd = process.platform === 'win32'
+        ? `chcp 65001 >nul && ${command}`
+        : command;
+
+    const child = spawn(cmd, {
         cwd,
         shell: true,
         env: process.env
@@ -49,8 +60,17 @@ function createSession(command: string, cwd: string, timeout?: number): ProcessS
         lastReadIndex: 0
     };
 
-    child.stdout.on('data', chunk => session.output.push(String(chunk)));
-    child.stderr.on('data', chunk => session.output.push(String(chunk)));
+    // 解码 Buffer → 字符串。Windows 上用 chcp 65001 切换到 UTF-8，
+    // 但某些程序可能忽略代码页设置，所以用 TextDecoder('utf-8') 
+    // 做容错解码（用 replacement 字符替代无效序列而非抛错）。
+    const decoder = new TextDecoder('utf-8', { fatal: false });
+    const decodeBuffer = (chunk: Buffer) =>
+        process.platform === 'win32'
+            ? decoder.decode(chunk, { stream: true })
+            : String(chunk);
+
+    child.stdout.on('data', chunk => session.output.push(decodeBuffer(chunk)));
+    child.stderr.on('data', chunk => session.output.push(decodeBuffer(chunk)));
     child.on('exit', (code, signal) => {
         session.exitCode = code;
         session.signal = signal;

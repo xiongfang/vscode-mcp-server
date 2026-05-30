@@ -15,12 +15,58 @@ interface ProcessSession {
     signal?: NodeJS.Signals | null;
     startedAt: number;
     lastReadIndex: number;
+    flushOutput?: () => void;
 }
 
 const sessions = new Map<string, ProcessSession>();
 let nextSessionId = 1;
 const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_MAX_OUTPUT = 20000;
+const MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024;
+
+class WindowsOutputDecoder {
+    private readonly utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+    private readonly gb18030Decoder = new TextDecoder('gb18030');
+    private pending = Buffer.alloc(0);
+
+    write(chunk: Buffer): string {
+        this.pending = Buffer.concat([this.pending, chunk]);
+        const output: string[] = [];
+        let lineEnd: number;
+
+        while ((lineEnd = this.pending.indexOf(0x0a)) !== -1) {
+            output.push(this.decode(this.pending.subarray(0, lineEnd + 1)));
+            this.pending = this.pending.subarray(lineEnd + 1);
+        }
+
+        // Keep normal partial lines intact so split multibyte characters are not
+        // misdetected. Bound the buffer for commands that stream without newlines.
+        if (this.pending.length > MAX_BUFFERED_OUTPUT_BYTES) {
+            output.push(this.decode(this.pending));
+            this.pending = Buffer.alloc(0);
+        }
+
+        return output.join('');
+    }
+
+    end(): string {
+        const output = this.decode(this.pending);
+        this.pending = Buffer.alloc(0);
+        return output;
+    }
+
+    private decode(chunk: Buffer): string {
+        if (chunk.length === 0) {
+            return '';
+        }
+
+        try {
+            return this.utf8Decoder.decode(chunk);
+        } catch {
+            return this.gb18030Decoder.decode(chunk);
+        }
+    }
+}
 
 function trimOutput(text: string, maxCharacters: number): { text: string; truncated: boolean } {
     if (text.length <= maxCharacters) {
@@ -60,18 +106,25 @@ function createSession(command: string, cwd: string, timeout?: number): ProcessS
         lastReadIndex: 0
     };
 
-    // 解码 Buffer → 字符串。Windows 上用 chcp 65001 切换到 UTF-8，
-    // 但某些程序可能忽略代码页设置，所以用 TextDecoder('utf-8') 
-    // 做容错解码（用 replacement 字符替代无效序列而非抛错）。
-    const decoder = new TextDecoder('utf-8', { fatal: false });
-    const decodeBuffer = (chunk: Buffer) =>
-        process.platform === 'win32'
-            ? decoder.decode(chunk, { stream: true })
-            : String(chunk);
+    // cmd.exe diagnostics can still use CP936 even after chcp 65001. Decode
+    // each Windows stream adaptively so UTF-8 tools and native errors coexist.
+    const stdoutDecoder = process.platform === 'win32' ? new WindowsOutputDecoder() : undefined;
+    const stderrDecoder = process.platform === 'win32' ? new WindowsOutputDecoder() : undefined;
+    const appendOutput = (chunk: string) => {
+        if (chunk) {
+            session.output.push(chunk);
+        }
+    };
+    session.flushOutput = () => {
+        appendOutput(stdoutDecoder?.end() ?? '');
+        appendOutput(stderrDecoder?.end() ?? '');
+    };
 
-    child.stdout.on('data', chunk => session.output.push(decodeBuffer(chunk)));
-    child.stderr.on('data', chunk => session.output.push(decodeBuffer(chunk)));
-    child.on('exit', (code, signal) => {
+    child.stdout.on('data', chunk => appendOutput(stdoutDecoder ? stdoutDecoder.write(chunk) : String(chunk)));
+    child.stderr.on('data', chunk => appendOutput(stderrDecoder ? stderrDecoder.write(chunk) : String(chunk)));
+    child.stdout.on('end', () => appendOutput(stdoutDecoder?.end() ?? ''));
+    child.stderr.on('end', () => appendOutput(stderrDecoder?.end() ?? ''));
+    child.on('close', (code, signal) => {
         session.exitCode = code;
         session.signal = signal;
     });
@@ -95,7 +148,7 @@ async function waitForSession(session: ProcessSession, timeout: number): Promise
 
     await new Promise<void>(resolve => {
         const timer = setTimeout(resolve, timeout);
-        session.process.once('exit', () => {
+        session.process.once('close', () => {
             clearTimeout(timer);
             resolve();
         });
@@ -103,6 +156,7 @@ async function waitForSession(session: ProcessSession, timeout: number): Promise
 }
 
 function getSessionOutput(session: ProcessSession, sinceLastRead: boolean, maxCharacters: number) {
+    session.flushOutput?.();
     const chunks = sinceLastRead ? session.output.slice(session.lastReadIndex) : session.output;
     if (sinceLastRead) {
         session.lastReadIndex = session.output.length;

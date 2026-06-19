@@ -16,6 +16,10 @@ export interface DiffLine {
 }
 
 interface Hunk {
+  oldStart: number;  // 旧文件起始行号（从 @@ 头解析）
+  oldCount: number;
+  newStart: number;  // 新文件起始行号
+  newCount: number;
   lines: string[];
 }
 
@@ -64,31 +68,45 @@ function linesMatch(a: string, b: string): boolean {
 
 /**
  * 在源码中搜索 hunk 的 "before" 块
+ * @param sourceLines 源文件行数组
+ * @param hunkBeforeLines hunk 的 before 部分（删除行 + 上下文行）
+ * @param startIndex 搜索起始位置（上一个 hunk 结束处）
+ * @param preferredStart 行号提示（从 @@ 头解析），优先在附近 ±20 行搜索
  */
 function findHunkInSource(
   sourceLines: string[],
   hunkBeforeLines: string[],
   startIndex: number,
+  preferredStart?: number,
 ): number {
-  for (
-    let i = startIndex;
-    i <= sourceLines.length - hunkBeforeLines.length;
-    i++
-  ) {
-    let match = true;
-    for (let j = 0; j < hunkBeforeLines.length; j++) {
-      const sl = sourceLines[i + j];
-      const hl = hunkBeforeLines[j];
-      if (!linesMatch(sl, hl)) {
-        match = false;
-        break;
-      }
-    }
-    if (match) {
-      return i;
+  // 搜索范围：从 startIndex 到末尾
+  const maxStart = sourceLines.length - hunkBeforeLines.length;
+  if (maxStart < 0) return -1;
+
+  // 先尝试在 preferredStart 附近 ±20 行范围内搜索
+  if (preferredStart !== undefined) {
+    const searchBegin = Math.max(startIndex, Math.max(0, preferredStart - 1 - 20));
+    const searchEnd = Math.min(maxStart, preferredStart - 1 + 20);
+    for (let i = searchBegin; i <= searchEnd; i++) {
+      if (tryMatchAt(sourceLines, i, hunkBeforeLines)) return i;
     }
   }
+
+  // 回退：从 startIndex 开始全文搜索
+  for (let i = startIndex; i <= maxStart; i++) {
+    if (tryMatchAt(sourceLines, i, hunkBeforeLines)) return i;
+  }
   return -1;
+}
+
+/** 检查 sourceLines 中 i 位置是否匹配 hunkBeforeLines */
+function tryMatchAt(sourceLines: string[], i: number, hunkBeforeLines: string[]): boolean {
+  for (let j = 0; j < hunkBeforeLines.length; j++) {
+    if (!linesMatch(sourceLines[i + j], hunkBeforeLines[j])) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -107,7 +125,15 @@ function parseUnifiedDiff(diffText: string): Hunk[] {
       if (currentHunk) {
         hunks.push(currentHunk);
       }
-      currentHunk = { lines: [] };
+      // 解析 @@ -oldStart,oldCount +newStart,newCount @@
+      const match = line.match(/^@@ -(\d+),?(\d*) \+(\d+),?(\d*) @@/);
+      currentHunk = {
+        oldStart: match ? parseInt(match[1]) : 1,
+        oldCount: match ? parseInt(match[2] || '1') : 1,
+        newStart: match ? parseInt(match[3]) : 1,
+        newCount: match ? parseInt(match[4] || '1') : 1,
+        lines: []
+      };
       continue;
     }
     currentHunk?.lines.push(line);
@@ -132,7 +158,7 @@ export function applyUnifiedDiff(
 
   for (const hunk of hunks) {
     const hunkBeforeLines = extractBeforeLines(hunk.lines);
-    const hunkStart = findHunkInSource(sourceLines, hunkBeforeLines, currentPos);
+    const hunkStart = findHunkInSource(sourceLines, hunkBeforeLines, currentPos, hunk.oldStart);
     
     if (hunkStart === -1) {
       throw new Error("Hunk could not be applied cleanly to source code.");
@@ -311,20 +337,21 @@ export function registerDiffTools(server: McpServer): void {
         const diffLines = applyUnifiedDiff(sourceCode, diff);
 
         // 4. 写回文件
-        const changeCount = await applyDiffToFile(path, diffLines);
+        await applyDiffToFile(path, diffLines);
 
-        // 5. 生成预览
-        const preview = formatDiffPreview(path, diffLines);
+        // 5. 统计
+        const added = diffLines.filter((l) => l.type === "new").length;
+        const removed = diffLines.filter((l) => l.type === "old").length;
 
         const result: CallToolResult = {
           content: [
             {
               type: 'text',
-              text: `✅ 成功应用 diff 到 ${path} (${changeCount} 处修改)\n\n修改预览:\n${preview}`
+              text: `✅ 成功应用 diff 到 ${path} (${added} 处新增, ${removed} 处删除)`
             }
           ]
         };
-        console.log(`[apply_diff] Success: ${changeCount} changes`);
+        console.log(`[apply_diff] Success: ${added} added, ${removed} removed`);
         return result;
       } catch (error) {
         console.error('[apply_diff] Error:', error);
@@ -409,7 +436,7 @@ export function registerDiffTools(server: McpServer): void {
           content: [
             {
               type: 'text',
-              text: `✅ 成功编辑 ${path}\n替换: "${oldText.substring(0, 60)}..." → "${newText.substring(0, 60)}..."`
+              text: `✅ 成功编辑 ${path}`
             }
           ]
         };

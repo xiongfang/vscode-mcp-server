@@ -1,5 +1,6 @@
+import * as vscode from 'vscode';
+import * as path from 'path';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
-import { TextDecoder } from 'util';
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from 'zod';
 import { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -15,58 +16,12 @@ interface ProcessSession {
     signal?: NodeJS.Signals | null;
     startedAt: number;
     lastReadIndex: number;
-    flushOutput?: () => void;
 }
 
 const sessions = new Map<string, ProcessSession>();
 let nextSessionId = 1;
 const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_MAX_OUTPUT = 20000;
-const MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024;
-
-class WindowsOutputDecoder {
-    private readonly utf8Decoder = new TextDecoder('utf-8', { fatal: true });
-    private readonly gb18030Decoder = new TextDecoder('gb18030');
-    private pending = Buffer.alloc(0);
-
-    write(chunk: Buffer): string {
-        this.pending = Buffer.concat([this.pending, chunk]);
-        const output: string[] = [];
-        let lineEnd: number;
-
-        while ((lineEnd = this.pending.indexOf(0x0a)) !== -1) {
-            output.push(this.decode(this.pending.subarray(0, lineEnd + 1)));
-            this.pending = this.pending.subarray(lineEnd + 1);
-        }
-
-        // Keep normal partial lines intact so split multibyte characters are not
-        // misdetected. Bound the buffer for commands that stream without newlines.
-        if (this.pending.length > MAX_BUFFERED_OUTPUT_BYTES) {
-            output.push(this.decode(this.pending));
-            this.pending = Buffer.alloc(0);
-        }
-
-        return output.join('');
-    }
-
-    end(): string {
-        const output = this.decode(this.pending);
-        this.pending = Buffer.alloc(0);
-        return output;
-    }
-
-    private decode(chunk: Buffer): string {
-        if (chunk.length === 0) {
-            return '';
-        }
-
-        try {
-            return this.utf8Decoder.decode(chunk);
-        } catch {
-            return this.gb18030Decoder.decode(chunk);
-        }
-    }
-}
 
 function trimOutput(text: string, maxCharacters: number): { text: string; truncated: boolean } {
     if (text.length <= maxCharacters) {
@@ -81,18 +36,20 @@ function trimOutput(text: string, maxCharacters: number): { text: string; trunca
 function createSession(command: string, cwd: string, timeout?: number): ProcessSession {
     const id = String(nextSessionId++);
 
-    // ── Windows 编码修复 ──
-    // Windows 的 cmd.exe 默认输出使用系统活动代码页（中文系统=GBK/CP936），
-    // 但 Node.js 的 String(chunk) 默认以 UTF-8 解码 Buffer，导致中文字符乱码。
-    // 解决方案：在 Windows 上强制切换 cmd 代码页为 UTF-8 (65001)，
-    // 并优先使用 TextDecoder 解码 Buffer，避免 String() 的 UTF-8 默认行为。
-    const cmd = process.platform === 'win32'
-        ? `chcp 65001 >nul && ${command}`
-        : command;
+    // ── Shell 检测 ──
+    // PowerShell 原生支持 Unicode，直接执行即可。
+    // cmd.exe 默认代码页为 GBK（中文系统），Node.js 的 toString() 以 UTF-8 解码会乱码，
+    // 因此自动加上 chcp 65001 切换代码页为 UTF-8。
+    const shellPath = vscode.env.shell || process.env.COMSPEC || 'cmd.exe';
+    const isCmd = path.basename(shellPath).toLowerCase() === 'cmd.exe';
+
+    const cmd = isCmd
+        ? `chcp 65001 >nul && ${command}`                     // cmd → 切 UTF-8
+        : `$OutputEncoding=[Console]::OutputEncoding=[Text.Encoding]::UTF8; ${command}`;  // PowerShell → 设 UTF-8
 
     const child = spawn(cmd, {
         cwd,
-        shell: true,
+        shell: shellPath,
         env: process.env
     });
 
@@ -106,24 +63,8 @@ function createSession(command: string, cwd: string, timeout?: number): ProcessS
         lastReadIndex: 0
     };
 
-    // cmd.exe diagnostics can still use CP936 even after chcp 65001. Decode
-    // each Windows stream adaptively so UTF-8 tools and native errors coexist.
-    const stdoutDecoder = process.platform === 'win32' ? new WindowsOutputDecoder() : undefined;
-    const stderrDecoder = process.platform === 'win32' ? new WindowsOutputDecoder() : undefined;
-    const appendOutput = (chunk: string) => {
-        if (chunk) {
-            session.output.push(chunk);
-        }
-    };
-    session.flushOutput = () => {
-        appendOutput(stdoutDecoder?.end() ?? '');
-        appendOutput(stderrDecoder?.end() ?? '');
-    };
-
-    child.stdout.on('data', chunk => appendOutput(stdoutDecoder ? stdoutDecoder.write(chunk) : String(chunk)));
-    child.stderr.on('data', chunk => appendOutput(stderrDecoder ? stderrDecoder.write(chunk) : String(chunk)));
-    child.stdout.on('end', () => appendOutput(stdoutDecoder?.end() ?? ''));
-    child.stderr.on('end', () => appendOutput(stderrDecoder?.end() ?? ''));
+    child.stdout.on('data', (chunk: Buffer) => session.output.push(chunk.toString()));
+    child.stderr.on('data', (chunk: Buffer) => session.output.push(chunk.toString()));
     child.on('close', (code, signal) => {
         session.exitCode = code;
         session.signal = signal;
@@ -156,7 +97,6 @@ async function waitForSession(session: ProcessSession, timeout: number): Promise
 }
 
 function getSessionOutput(session: ProcessSession, sinceLastRead: boolean, maxCharacters: number) {
-    session.flushOutput?.();
     const chunks = sinceLastRead ? session.output.slice(session.lastReadIndex) : session.output;
     if (sinceLastRead) {
         session.lastReadIndex = session.output.length;

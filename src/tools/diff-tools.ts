@@ -59,9 +59,7 @@ function extractBeforeLines(hunkLines: string[]): string[] {
  * 比较两行是否匹配（忽略行首空白）
  */
 function linesMatch(a: string, b: string): boolean {
-  const trimmedA = a.replace(/^\s+/, "");
-  const trimmedB = b.replace(/^\s+/, "");
-  return trimmedA === trimmedB;
+  return a === b;
 }
 
 /**
@@ -277,8 +275,7 @@ export function registerDiffTools(server: McpServer): void {
 
     注意事项:
     - ---/+++ 文件头可选
-    - 上下文行（空格开头）用于定位，建议提供
-    - 行首空白会被忽略（模糊匹配）
+    - 上下文行（空格开头）用于定位，必须精确匹配
     - 所有 hunk 必须都能在源码中找到匹配`,
     {
       path: z.string().describe('要编辑的文件路径（相对工作区根目录）'),
@@ -373,8 +370,11 @@ export function registerDiffTools(server: McpServer): void {
         const document = await vscode.workspace.openTextDocument(fileUri);
         const fullText = document.getText();
 
+        // 换行符归一化：将 oldText 适配为文件的实际换行符
+        const lineEnding = detectLineEnding(fullText);
+        const normalizedOldText = oldText.replace(/\r?\n/g, lineEnding);
         // 在全文搜索 oldText
-        const matchIndex = fullText.indexOf(oldText);
+        const matchIndex = fullText.indexOf(normalizedOldText);
         if (matchIndex === -1) {
           // 没找到，给个预览帮助调试
           const preview = fullText.length > 200
@@ -382,19 +382,21 @@ export function registerDiffTools(server: McpServer): void {
             : fullText;
           throw new Error(
             `在 ${path} 中未找到匹配的文本。\n` +
-            `要查找: "${oldText.substring(0, 100)}"\n` +
+            `要查找: "${normalizedOldText.substring(0, 100)}"\n` +
             `文件内容预览:\n${preview}`
           );
         }
 
         // 计算匹配范围
         const matchStartPos = document.positionAt(matchIndex);
-        const matchEndPos = document.positionAt(matchIndex + oldText.length);
+        const matchEndPos = document.positionAt(matchIndex + normalizedOldText.length);
         const matchRange = new vscode.Range(matchStartPos, matchEndPos);
 
+        // 将 newText 的换行符适配为文件的实际换行符
+        const normalizedNewText = newText.replace(/\r?\n/g, lineEnding);
         // 应用编辑（使用 WorkspaceEdit，不依赖 UI）
         const workspaceEdit = new vscode.WorkspaceEdit();
-        workspaceEdit.replace(fileUri, matchRange, newText);
+        workspaceEdit.replace(fileUri, matchRange, normalizedNewText);
         const success = await vscode.workspace.applyEdit(workspaceEdit);
 
         if (!success) {
@@ -483,6 +485,77 @@ export function registerDiffTools(server: McpServer): void {
     overwrite: z.boolean().optional().default(false)
   });
 
+  // ---- applySinglePatch (内部函数) ----
+  async function applySinglePatch(operation: z.infer<typeof patchOperationSchema>): Promise<void> {
+    const fileUri = resolveWorkspacePath(operation.path).uri;
+
+    if (operation.type === 'add') {
+      const edit = new vscode.WorkspaceEdit();
+      edit.createFile(fileUri, {
+        overwrite: operation.overwrite,
+        contents: new TextEncoder().encode(operation.content ?? '')
+      });
+      const success = await vscode.workspace.applyEdit(edit);
+      if (!success) {throw new Error(`Failed to add file: ${operation.path}`);}
+      await vscode.workspace.saveAll(false);
+    } else if (operation.type === 'delete') {
+      const edit = new vscode.WorkspaceEdit();
+      edit.deleteFile(fileUri, { ignoreIfNotExists: false });
+      const success = await vscode.workspace.applyEdit(edit);
+      if (!success) {throw new Error(`Failed to delete file: ${operation.path}`);}
+      await vscode.workspace.saveAll(false);
+    } else if (operation.type === 'move') {
+      if (!operation.targetPath) {throw new Error(`move requires targetPath`);}
+      const edit = new vscode.WorkspaceEdit();
+      edit.renameFile(fileUri, resolveWorkspacePath(operation.targetPath).uri, { overwrite: operation.overwrite });
+      const success = await vscode.workspace.applyEdit(edit);
+      if (!success) {throw new Error(`Failed to move file: ${operation.path}`);}
+      await vscode.workspace.saveAll(false);
+    } else {
+      if (operation.oldText === undefined || operation.newText === undefined)
+        {throw new Error(`update requires oldText and newText`);}
+      const document = await vscode.workspace.openTextDocument(fileUri);
+      const fullText = document.getText();
+      const lineEnding = detectLineEnding(fullText);
+      const normalizedOldText = operation.oldText.replace(/\r?\n/g, lineEnding);
+      const normalizedNewText = operation.newText.replace(/\r?\n/g, lineEnding);
+      const index = fullText.indexOf(normalizedOldText);
+      if (index === -1) {throw new Error(`oldText not found in ${operation.path}`);}
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(fileUri,
+        new vscode.Range(document.positionAt(index), document.positionAt(index + normalizedOldText.length)),
+        normalizedNewText
+      );
+      const success = await vscode.workspace.applyEdit(edit);
+      if (!success) {throw new Error(`Failed to update file: ${operation.path}`);}
+      await document.save();
+    }
+  }
+
+  // ---- apply_patch (单操作) ----
+  server.tool(
+    'apply_patch',
+    `对单个文件执行一次 patch 操作（add/update/delete/move）。参数为单个 patchOperationSchema 对象。`,
+    {
+      operation: patchOperationSchema,
+      format: z.enum(['text', 'json']).optional().default('text')
+    },
+    async ({ operation, format = 'text' }): Promise<CallToolResult> => {
+      console.log(`[apply_patch] type=${operation.type} path=${operation.path}`);
+      try {
+        await applySinglePatch(operation);
+        return toolResult({
+          ok: true,
+          summary: `Applied ${operation.type} on ${operation.path}`,
+          data: { operation }
+        }, format as ToolFormat);
+      } catch (error) {
+        console.error('[apply_patch] Error:', error);
+        throw error;
+      }
+    }
+  );
+
   async function previewPatchOperations(operations: z.infer<typeof patchOperationSchema>[]) {
     const previews: Array<{ type: string; path: string; targetPath?: string; summary: string }> = [];
     for (const operation of operations) {
@@ -537,57 +610,29 @@ export function registerDiffTools(server: McpServer): void {
   );
 
   server.tool(
-    'apply_patch',
-    `Applies a structured multi-file patch. Supports add, update, delete, and move operations.`,
+    'apply_patches',
+    `Applies a structured multi-file patch (batch operations). Supports add, update, delete, and move operations.`,
     {
       operations: z.array(patchOperationSchema),
       format: z.enum(['text', 'json']).optional().default('text')
     },
     async ({ operations, format = 'text' }): Promise<CallToolResult> => {
-      const previews = await previewPatchOperations(operations);
-      const edit = new vscode.WorkspaceEdit();
+      console.log(`[apply_patches] Tool called with ${operations.length} operations`);
 
-      for (const operation of operations) {
-        const fileUri = resolveWorkspacePath(operation.path).uri;
-        if (operation.type === 'add') {
-          edit.createFile(fileUri, {
-            overwrite: operation.overwrite,
-            contents: new TextEncoder().encode(operation.content ?? '')
-          });
-        } else if (operation.type === 'delete') {
-          edit.deleteFile(fileUri, { ignoreIfNotExists: false });
-        } else if (operation.type === 'move') {
-          if (!operation.targetPath) {
-            throw new Error(`move operation for ${operation.path} requires targetPath`);
-          }
-          edit.renameFile(fileUri, resolveWorkspacePath(operation.targetPath).uri, { overwrite: operation.overwrite });
-        } else {
-          if (operation.oldText === undefined || operation.newText === undefined) {
-            throw new Error(`update operation for ${operation.path} requires oldText and newText`);
-          }
-          const document = await vscode.workspace.openTextDocument(fileUri);
-          const fullText = document.getText();
-          const index = fullText.indexOf(operation.oldText);
-          if (index === -1) {
-            throw new Error(`oldText not found in ${operation.path}`);
-          }
-          const lineEnding = detectLineEnding(fullText);
-          const newText = operation.newText.replace(/\r?\n/g, lineEnding);
-          edit.replace(fileUri, new vscode.Range(document.positionAt(index), document.positionAt(index + operation.oldText.length)), newText);
+      try {
+        for (const operation of operations) {
+          await applySinglePatch(operation);
         }
-      }
 
-      const success = await vscode.workspace.applyEdit(edit);
-      if (!success) {
-        throw new Error('Failed to apply structured patch');
+        return toolResult({
+          ok: true,
+          summary: `Applied ${operations.length} patch operation(s)`,
+          data: { operations }
+        }, format as ToolFormat);
+      } catch (error) {
+        console.error('[apply_patches] Error:', error);
+        throw error;
       }
-      await vscode.workspace.saveAll(false);
-
-      return toolResult({
-        ok: true,
-        summary: `Applied ${operations.length} patch operation(s)`,
-        data: { operations: previews }
-      }, format as ToolFormat, previews.map(preview => preview.summary).join('\n'));
     }
   );
 }

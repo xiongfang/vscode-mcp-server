@@ -25,8 +25,7 @@ function getToolConfiguration(): ToolConfiguration {
         diff: enabledTools.diff ?? true,
         shell: enabledTools.shell ?? true,
         diagnostics: enabledTools.diagnostics ?? true,
-        symbol: enabledTools.symbol ?? true,
-        git: enabledTools.git ?? true
+        symbol: enabledTools.symbol ?? true
     };
 }
 

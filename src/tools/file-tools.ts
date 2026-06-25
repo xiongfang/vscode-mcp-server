@@ -293,12 +293,12 @@ export function registerFileTools(
             glob: z.string().optional().default('**/*').describe('VS Code glob include pattern'),
             exclude: z.string().optional().default(DEFAULT_EXCLUDES).describe('VS Code glob exclude pattern'),
             caseSensitive: z.boolean().optional().default(false),
-            regex: z.boolean().optional().default(false),
+            regex: z.boolean().optional().default(true),
             maxResults: z.number().optional().default(100),
             contextLines: z.number().optional().default(0),
             format: z.enum(['text', 'json']).optional().default('text')
         },
-        async ({ query, glob = '**/*', exclude = DEFAULT_EXCLUDES, caseSensitive = false, regex = false, maxResults = 100, contextLines = 0, format = 'text' }): Promise<CallToolResult> => {
+        async ({ query, glob = '**/*', exclude = DEFAULT_EXCLUDES, caseSensitive = false, regex = true, maxResults = 100, contextLines = 0, format = 'text' }): Promise<CallToolResult> => {
             const start = Date.now();
             const files = await vscode.workspace.findFiles(glob, exclude, 5000);
             const flags = caseSensitive ? 'g' : 'gi';

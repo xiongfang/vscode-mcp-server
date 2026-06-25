@@ -8,7 +8,7 @@ import { registerShellTools } from './tools/shell-tools';
 import { registerDiagnosticsTools } from './tools/diagnostics-tools';
 import { registerSymbolTools } from './tools/symbol-tools';
 import { registerDiffTools } from './tools/diff-tools';
-import { registerGitTools } from './tools/git-tools';
+
 import { logger } from './utils/logger';
 
 export interface ToolConfiguration {
@@ -18,7 +18,6 @@ export interface ToolConfiguration {
     shell: boolean;
     diagnostics: boolean;
     symbol: boolean;
-    git?: boolean;
 }
 
 export class MCPServer {
@@ -44,8 +43,7 @@ export class MCPServer {
             diff: true,
             shell: true,
             diagnostics: true,
-            symbol: true,
-            git: true
+            symbol: true
         };
         this.app = express();
         this.app.use(express.json());
@@ -126,12 +124,7 @@ export class MCPServer {
                 logger.info('MCP diff tools disabled by configuration');
             }
 
-            if (this.toolConfig.git ?? true) {
-                registerGitTools(this.server);
-                logger.info('MCP git tools registered successfully');
-            } else {
-                logger.info('MCP git tools disabled by configuration');
-            }
+
         } else {
             logger.warn('File listing callback not set during tools setup');
         }

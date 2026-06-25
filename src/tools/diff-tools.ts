@@ -366,7 +366,7 @@ export function registerDiffTools(server: McpServer): void {
     'edit_file',
     `在文件中精确查找文本并替换。
 
-    工作原理：在文件中逐行查找 oldText，精确匹配后替换为 newText。
+    工作原理：在文件中查找 oldText，精确匹配后替换为 newText。
     不需要行号，不需要正则。
 
     适用场景：
@@ -374,10 +374,11 @@ export function registerDiffTools(server: McpServer): void {
     - 修改配置项
     - 替换固定的代码片段
 
-    限制：
-    - 只替换第一个匹配项（从文件开头匹配）
+    安全特性：
+    - 唯一匹配检查：多次匹配直接报错，防止改错位置
+    - 返回 diff 详情：Agent 可确认修改内容是否正确
     - 不支持模糊匹配，oldText 必须与原文完全一致
-    - 不支持正则表达式（如需正则请用 replace_regex）`,
+    - 不支持正则表达式（如需正则请用 apply_diff）`,
     {
       path: z.string().describe('要编辑的文件路径（相对工作区根目录）'),
       oldText: z.string().describe('要匹配的原文内容（精确匹配，区分大小写）'),
@@ -397,13 +398,24 @@ export function registerDiffTools(server: McpServer): void {
         const document = await vscode.workspace.openTextDocument(fileUri);
         const fullText = document.getText();
 
-        // 换行符归一化：将 oldText 适配为文件的实际换行符
+        // 换行符归一化
         const lineEnding = detectLineEnding(fullText);
         const normalizedOldText = oldText.replace(/\r?\n/g, lineEnding);
-        // 在全文搜索 oldText
-        const matchIndex = fullText.indexOf(normalizedOldText);
-        if (matchIndex === -1) {
-          // 没找到，给个预览帮助调试
+        const normalizedNewText = newText.replace(/\r?\n/g, lineEnding);
+
+        // 统计所有匹配位置
+        const matchPositions: number[] = [];
+        let searchFrom = 0;
+        while (true) {
+          const idx = fullText.indexOf(normalizedOldText, searchFrom);
+          if (idx === -1) break;
+          matchPositions.push(idx);
+          searchFrom = idx + normalizedOldText.length;
+        }
+
+        const matchCount = matchPositions.length;
+
+        if (matchCount === 0) {
           const preview = fullText.length > 200
             ? fullText.substring(0, 200) + '...'
             : fullText;
@@ -414,14 +426,64 @@ export function registerDiffTools(server: McpServer): void {
           );
         }
 
-        // 计算匹配范围
+        if (matchCount > 1) {
+          // 列出所有匹配位置的行号
+          const locationLines = matchPositions.map(idx => {
+            const pos = document.positionAt(idx);
+            const lineText = document.lineAt(pos.line).text;
+            return `  第 ${pos.line + 1} 行: ${lineText.substring(0, 120)}`;
+          }).join('\n');
+
+          throw new Error(
+            `编辑失败：oldText 在 ${path} 中出现了 ${matchCount} 次。\n\n` +
+            `匹配位置:\n${locationLines}\n\n` +
+            `请使用 apply_diff（通过行号+上下文精确定位），` +
+            `或提供更长的 oldText 来唯一匹配目标位置。`
+          );
+        }
+
+        // === 唯一匹配 ===
+        const matchIndex = matchPositions[0];
         const matchStartPos = document.positionAt(matchIndex);
         const matchEndPos = document.positionAt(matchIndex + normalizedOldText.length);
         const matchRange = new vscode.Range(matchStartPos, matchEndPos);
+        const lineNum = matchStartPos.line + 1; // 1-based
 
-        // 将 newText 的换行符适配为文件的实际换行符
-        const normalizedNewText = newText.replace(/\r?\n/g, lineEnding);
-        // 应用编辑（使用 WorkspaceEdit，不依赖 UI）
+        // 计算 oldText 跨了多少行
+        const oldStartLine = matchStartPos.line;
+        const oldEndLine = matchEndPos.line;
+        const oldLineCount = oldEndLine - oldStartLine + 1;
+
+        // 提取上下文（前后各 3 行）
+        const contextBefore = Math.min(3, oldStartLine);
+        const contextAfter = Math.min(3, document.lineCount - oldEndLine - 1);
+
+        // 构建 unified diff 输出
+        const oldLines = normalizedOldText.split(lineEnding);
+        const newLines = normalizedNewText.split(lineEnding);
+
+        let diffOutput = `--- a/${path}\n+++ b/${path}\n`;
+        diffOutput += `@@ -${oldStartLine + 1 - contextBefore},${contextBefore + oldLineCount + contextAfter} `;
+        diffOutput += `+${oldStartLine + 1 - contextBefore},${contextBefore + newLines.length + contextAfter} @@\n`;
+
+        // 上下文行（before）
+        for (let i = 0; i < contextBefore; i++) {
+          diffOutput += ` ${document.lineAt(oldStartLine - contextBefore + i).text}\n`;
+        }
+        // old lines（删除行）
+        for (const l of oldLines) {
+          diffOutput += `-${l}\n`;
+        }
+        // new lines（新增行）
+        for (const l of newLines) {
+          diffOutput += `+${l}\n`;
+        }
+        // 上下文行（after）
+        for (let i = 0; i < contextAfter; i++) {
+          diffOutput += ` ${document.lineAt(oldEndLine + 1 + i).text}\n`;
+        }
+
+        // 执行替换
         const workspaceEdit = new vscode.WorkspaceEdit();
         workspaceEdit.replace(fileUri, matchRange, normalizedNewText);
         const success = await vscode.workspace.applyEdit(workspaceEdit);
@@ -436,11 +498,11 @@ export function registerDiffTools(server: McpServer): void {
           content: [
             {
               type: 'text',
-              text: `✅ 成功编辑 ${path}`
+              text: `✅ 已编辑 ${path} (第 ${lineNum} 行, ${oldLines.length} 行↓ ${newLines.length} 行↑)\n\n${diffOutput}`
             }
           ]
         };
-        console.log('[edit_file] Success');
+        console.log('[edit_file] Success with diff output');
         return result;
       } catch (error) {
         console.error('[edit_file] Error:', error);
